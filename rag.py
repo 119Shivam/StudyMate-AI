@@ -175,7 +175,217 @@ def build_history(chat_history):
 
 
 # --------------------------------------------------
-# 5. GENERATE INITIAL ANSWER
+# 5. GET MOST RECENT USER QUESTION
+# --------------------------------------------------
+
+def get_latest_previous_user_question(chat_history):
+
+    """
+    Find the most recent question asked by the student.
+
+    Assistant responses are deliberately ignored here.
+    This prevents an older assistant answer from becoming
+    the topic of a new follow-up question.
+    """
+
+    if not chat_history:
+        return None
+
+    for message in reversed(chat_history):
+
+        if message.get("role") == "user":
+
+            content = message.get(
+                "content",
+                ""
+            ).strip()
+
+            if content:
+                return content
+
+    return None
+
+
+# --------------------------------------------------
+# 6. CONVERSATION-AWARE QUERY REWRITING
+# --------------------------------------------------
+
+def rewrite_retrieval_query(
+    user_query,
+    chat_history=None
+):
+
+    """
+    Rewrite follow-up questions into standalone retrieval queries.
+
+    The latest previous USER question receives priority
+    when resolving references such as it, its, this and that.
+
+    Older topics are used only when the current question
+    explicitly refers to them.
+    """
+
+    original_query = user_query.strip()
+
+    if not original_query:
+        return original_query
+
+    if not chat_history:
+        return original_query
+
+    history = build_history(chat_history)
+
+    latest_user_question = (
+        get_latest_previous_user_question(chat_history)
+    )
+    print("DEBUG - Latest previous user question:", latest_user_question)
+    print("DEBUG - Full conversation history:", history)
+
+    if not latest_user_question:
+        return original_query
+
+    prompt = f"""
+You are the query-rewriting component of StudyMate AI.
+
+Your task is to rewrite the student's CURRENT QUESTION
+into a clear, standalone search query for retrieving
+relevant passages from academic PDFs.
+
+CONVERSATION HISTORY:
+{history}
+
+MOST RECENT PREVIOUS QUESTION ASKED BY THE STUDENT:
+{latest_user_question}
+
+CURRENT QUESTION:
+{original_query}
+
+
+IMPORTANT TOPIC SELECTION RULES:
+
+1. The MOST RECENT PREVIOUS QUESTION asked by the student
+   is the default topic for resolving references.
+
+2. If the current question contains pronouns or references
+   such as "it", "its", "this", "that", "they", "these",
+   "those", or similar expressions, first check whether
+   they refer to the topic in the most recent previous
+   user question.
+
+3. Do NOT automatically select an older topic merely
+   because it has a longer assistant explanation.
+
+4. Assistant responses are NOT more important than
+   the student's latest question when identifying the
+   topic of a follow-up.
+
+5. If the assistant previously said that information
+   could not be found, this does NOT cancel or replace
+   the topic of the student's question.
+
+6. Use an older topic only when the current question
+   explicitly identifies or clearly refers to that
+   older topic.
+
+7. If the current question is independent and contains
+   its own complete topic, preserve that topic.
+
+8. Never replace the latest topic with an older topic
+   without a clear reason in the student's current question.
+
+
+REWRITING INSTRUCTIONS:
+
+1. Resolve unclear references using the correct topic.
+
+2. Convert follow-up questions into standalone search
+   queries that clearly mention the topic.
+
+3. Preserve the student's original meaning and intent.
+
+4. Keep the requested details, such as characteristics,
+   advantages, examples, definitions or comparisons.
+
+5. Do not answer the question.
+
+6. Do not add facts, explanations or examples.
+
+7. Do not introduce unrelated topics.
+
+8. If the current question is already independent,
+   return it unchanged.
+
+9. Use simple, clear academic English.
+
+
+EXAMPLE:
+
+Previous student question:
+Explain the concept of a quasi-static process.
+
+Previous assistant response:
+A quasi-static process is an extremely slow process.
+
+Latest student question:
+What is entropy?
+
+Latest assistant response:
+I could not find relevant information in the PDFs.
+
+Current student question:
+Explain its characteristics in simple language with an example.
+
+Correct rewritten query:
+Explain the characteristics of entropy in simple language
+with an example.
+
+Incorrect rewritten query:
+Explain the characteristics of a quasi-static process
+in simple language with an example.
+
+
+OUTPUT FORMAT:
+
+Return ONLY the rewritten search query.
+
+Do not include headings, explanations, quotes
+or additional text.
+
+REWRITTEN QUERY:
+"""
+
+    try:
+
+        response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt
+        )
+
+        if not response or not response.text:
+            return original_query
+
+        rewritten_query = response.text.strip()
+
+        rewritten_query = rewritten_query.strip('"').strip("'")
+
+        if not rewritten_query:
+            return original_query
+
+        return rewritten_query
+
+    except Exception as error:
+
+        print(
+            f"Query rewriting failed: {error}"
+        )
+
+        # Continue retrieval using the original question
+        # if Gemini query rewriting fails.
+        return original_query
+
+
+# --------------------------------------------------
+# 7. GENERATE INITIAL ANSWER
 # --------------------------------------------------
 
 def generate_draft(
@@ -239,7 +449,7 @@ Now prepare the answer.
 
 
 # --------------------------------------------------
-# 6. VERIFY DRAFT ANSWER AGAINST PDF SOURCES
+# 8. VERIFY DRAFT ANSWER AGAINST PDF SOURCES
 # --------------------------------------------------
 
 def verify_answer(
@@ -333,7 +543,7 @@ Do not include your internal verification process.
 
 
 # --------------------------------------------------
-# 7. MAIN ANSWER GENERATION FUNCTION
+# 9. MAIN ANSWER GENERATION FUNCTION
 # --------------------------------------------------
 
 def generate_answer(

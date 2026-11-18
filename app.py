@@ -30,7 +30,11 @@ from reportlab.platypus import (
     HRFlowable
 )
 
-from rag import generate_answer, generate_suggested_questions
+from rag import (
+    generate_answer,
+    generate_suggested_questions,
+    rewrite_retrieval_query
+)
 
 
 # --------------------------------------------------
@@ -269,11 +273,6 @@ def save_document_bundle(
     ocr_pages,
     suggested_questions
 ):
-    """
-    Save original PDFs, extracted chunks, FAISS index
-    and document metadata for a particular chat.
-    """
-
     chat_dir = get_chat_storage_dir(chat_id)
     originals_dir = chat_dir / "originals"
 
@@ -293,7 +292,6 @@ def save_document_bundle(
         stored_name = f"{file_number}_{safe_name}"
 
         file_path = originals_dir / stored_name
-
         file_path.write_bytes(uploaded_file.getvalue())
 
         saved_files.append({
@@ -339,11 +337,6 @@ def save_document_bundle(
 
 
 def load_document_bundle(chat_id):
-    """
-    Restore a chat's document chunks and FAISS index.
-    Returns True if the saved bundle is available.
-    """
-
     chat_dir = get_chat_storage_dir(chat_id)
 
     chunks_path = chat_dir / "chunks.json"
@@ -417,7 +410,9 @@ defaults = {
     "ocr_pages": 0,
     "suggested_questions": [],
     "pending_question": None,
-    "active_chat_id": None
+    "active_chat_id": None,
+    "debug_original_query": None,
+    "debug_retrieval_query": None
 }
 
 for key, value in defaults.items():
@@ -434,7 +429,6 @@ if st.session_state.active_chat_id is None:
         chat_id = create_chat()
 
     st.session_state.active_chat_id = chat_id
-
     st.session_state.messages = load_chat_messages(chat_id)
 
     load_document_bundle(chat_id)
@@ -608,86 +602,11 @@ def create_chunks(
 
 
 # --------------------------------------------------
-# 9. FOLLOW-UP QUESTION DETECTION
+# 9. CONVERSATION-AWARE QUERY REWRITING
 # --------------------------------------------------
 
-def is_follow_up(user_query):
-    query = user_query.lower().strip()
-    query = re.sub(r"[^\w\s]", "", query)
+# Query rewriting is handled by Gemini through rag.py.
 
-    follow_up_patterns = [
-        r"\bit\b",
-        r"\bits\b",
-        r"\bthis\b",
-        r"\bthat\b",
-        r"\bthese\b",
-        r"\bthose\b",
-        r"\bthey\b",
-        r"\bthem\b",
-        r"\btheir\b",
-        r"\bformer\b",
-        r"\blatter\b",
-        r"\bwhat about\b",
-        r"\bhow about\b",
-        r"\bgive an example\b",
-        r"\bexplain more\b",
-        r"\belaborate\b",
-        r"\btell me more\b",
-        r"\bcontinue\b",
-        r"\bsame\b",
-        r"\bmore details\b",
-        r"\bmore about\b",
-        r"\bcompare them\b",
-        r"\bdifference between them\b"
-    ]
-
-    if any(
-        re.search(pattern, query)
-        for pattern in follow_up_patterns
-    ):
-        return True
-
-    short_follow_ups = [
-        "why",
-        "how",
-        "why so",
-        "how so",
-        "example",
-        "another example",
-        "explain",
-        "elaborate",
-        "continue",
-        "and then",
-        "what next"
-    ]
-
-    return query in short_follow_ups
-
-
-def build_retrieval_query(user_query, messages):
-    query = user_query.strip()
-
-    if not messages:
-        return query
-
-    if not is_follow_up(query):
-        return query
-
-    previous_questions = [
-        message["content"]
-        for message in messages
-        if message["role"] == "user"
-    ]
-
-    if not previous_questions:
-        return query
-
-    previous_question = previous_questions[-1]
-
-    return (
-        f"Previous topic/question: {previous_question}\n"
-        f"Current follow-up question: {query}"
-    )
 
 # --------------------------------------------------
 # 10. MMR RETRIEVAL WITH RELEVANCE FILTERING
@@ -735,12 +654,10 @@ def retrieve_chunks(
 
         similarity_score = float(distances[0][position])
 
-        # Remove chunks below the relevance threshold.
         if similarity_score < RELEVANCE_THRESHOLD:
             continue
 
         chunk_index = int(chunk_index)
-
         chunk_vector = index.reconstruct(chunk_index)
 
         candidates.append({
@@ -755,11 +672,9 @@ def retrieve_chunks(
     del query_embedding
     gc.collect()
 
-    # No sufficiently relevant chunks found.
     if not candidates:
         return []
 
-    # Apply Maximum Marginal Relevance (MMR).
     selected = []
     remaining = candidates.copy()
 
@@ -801,7 +716,6 @@ def retrieve_chunks(
         selected.append(best_candidate)
         remaining.remove(best_candidate)
 
-    # Prepare final retrieved chunks.
     retrieved_chunks = []
 
     for candidate in selected:
@@ -814,6 +728,7 @@ def retrieve_chunks(
         })
 
     return retrieved_chunks
+
 
 # --------------------------------------------------
 # 11. CALLBACKS
@@ -831,6 +746,9 @@ def open_chat(chat_id):
     )
 
     st.session_state.pending_question = None
+
+    st.session_state.debug_original_query = None
+    st.session_state.debug_retrieval_query = None
 
     reset_document_session()
     load_document_bundle(chat_id)
@@ -1098,6 +1016,9 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.pending_question = None
 
+        st.session_state.debug_original_query = None
+        st.session_state.debug_retrieval_query = None
+
         reset_document_session()
 
         st.rerun()
@@ -1220,6 +1141,9 @@ with st.sidebar:
         st.session_state.messages = []
         st.session_state.pending_question = None
 
+        st.session_state.debug_original_query = None
+        st.session_state.debug_retrieval_query = None
+
         st.rerun()
 
     st.divider()
@@ -1272,6 +1196,9 @@ if process_button:
 
     st.session_state.messages = []
     st.session_state.pending_question = None
+
+    st.session_state.debug_original_query = None
+    st.session_state.debug_retrieval_query = None
 
     new_chat_id = create_chat()
     st.session_state.active_chat_id = new_chat_id
@@ -1386,7 +1313,6 @@ if process_button:
                 f"questions could not be generated: {question_error}"
             )
 
-        # Save the PDFs, chunks, FAISS index and metadata.
         status_text.info("💾 Saving documents for future sessions...")
 
         save_document_bundle(
@@ -1556,6 +1482,36 @@ else:
             "cannot be restored."
         )
 
+    # --------------------------------------------------
+    # QUERY REWRITING DEBUG OUTPUT
+    # --------------------------------------------------
+
+    st.write(
+        "DEBUG CHECK:",
+        st.session_state.debug_original_query
+    )
+
+    if st.session_state.debug_original_query is not None:
+
+        with st.expander(
+            "🛠️ Query Rewriting Debug",
+            expanded=True
+        ):
+
+            st.markdown("**Original question:**")
+
+            st.code(
+                st.session_state.debug_original_query,
+                language=None
+            )
+
+            st.markdown("**Rewritten retrieval query:**")
+
+            st.code(
+                st.session_state.debug_retrieval_query,
+                language=None
+            )
+
     # Display saved messages.
     for message in st.session_state.messages:
 
@@ -1608,11 +1564,24 @@ else:
 
             user_query = user_query.strip()
 
-            retrieval_query = build_retrieval_query(
-                user_query,
-                st.session_state.messages
+            recent_history = st.session_state.messages[-8:]
+
+            with st.spinner(
+                "🧠 Understanding your question..."
+            ):
+                retrieval_query = rewrite_retrieval_query(
+                    user_query,
+                    chat_history=recent_history
+                )
+
+            # Save debug information in session state.
+            st.session_state.debug_original_query = user_query
+
+            st.session_state.debug_retrieval_query = (
+                retrieval_query
             )
 
+            # Save the original question, not the rewritten query.
             st.session_state.messages.append({
                 "role": "user",
                 "content": user_query,
@@ -1652,7 +1621,7 @@ else:
                         )
 
                     else:
-                        recent_history = (
+                        answer_history = (
                             st.session_state.messages[-7:-1]
                         )
 
@@ -1663,7 +1632,7 @@ else:
                             answer = generate_answer(
                                 user_query,
                                 retrieved_chunks,
-                                chat_history=recent_history
+                                chat_history=answer_history
                             )
 
                     st.markdown(answer)
