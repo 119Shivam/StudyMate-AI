@@ -1,0 +1,18 @@
+
+# Environment and API keys
+.env
+.env.*
+!.env.example
+
+# Python environment
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+
+# Private application data
+*.db
+document_storage/
+
+# Streamlit secrets
+.streamlit/secrets.toml
