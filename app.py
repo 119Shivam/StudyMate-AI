@@ -668,11 +668,12 @@ def build_retrieval_query(user_query, messages):
         f"Previous topic/question: {previous_question}\n"
         f"Current follow-up question: {query}"
     )
-
-
 # --------------------------------------------------
-# 10. MMR RETRIEVAL
+# 10. MMR RETRIEVAL WITH RELEVANCE FILTERING
 # --------------------------------------------------
+
+RELEVANCE_THRESHOLD = 0.35
+
 
 def retrieve_chunks(
     query,
@@ -707,10 +708,18 @@ def retrieve_chunks(
     candidates = []
 
     for position, chunk_index in enumerate(indices[0]):
+
         if chunk_index == -1:
             continue
 
+        similarity_score = float(distances[0][position])
+
+        # Remove chunks below the relevance threshold.
+        if similarity_score < RELEVANCE_THRESHOLD:
+            continue
+
         chunk_index = int(chunk_index)
+
         chunk_vector = index.reconstruct(chunk_index)
 
         candidates.append({
@@ -719,28 +728,31 @@ def retrieve_chunks(
                 chunk_vector,
                 dtype=np.float32
             ),
-            "similarity_score": float(
-                distances[0][position]
-            )
+            "similarity_score": similarity_score
         })
 
     del query_embedding
     gc.collect()
 
+    # No sufficiently relevant chunks found.
     if not candidates:
         return []
 
+    # Apply Maximum Marginal Relevance (MMR).
     selected = []
     remaining = candidates.copy()
 
     while remaining and len(selected) < top_k:
+
         best_candidate = None
         best_score = float("-inf")
 
         for candidate in remaining:
+
             relevance = candidate["similarity_score"]
 
             if selected:
+
                 redundancy_scores = [
                     float(
                         np.dot(
@@ -768,9 +780,11 @@ def retrieve_chunks(
         selected.append(best_candidate)
         remaining.remove(best_candidate)
 
+    # Prepare final retrieved chunks.
     retrieved_chunks = []
 
     for candidate in selected:
+
         chunk = document_chunks[candidate["index"]]
 
         retrieved_chunks.append({
@@ -779,7 +793,6 @@ def retrieve_chunks(
         })
 
     return retrieved_chunks
-
 
 # --------------------------------------------------
 # 11. CALLBACKS
